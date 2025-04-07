@@ -1,19 +1,24 @@
-import type { Message } from "ai"
-import { FiUser } from "react-icons/fi"
-import { GiScales } from "react-icons/gi"
-import { cn } from "@/lib/utils"
+import type { Message } from "ai";
+import { FiUser } from "react-icons/fi";
+import { GiScales } from "react-icons/gi";
+import { cn } from "@/lib/utils";
 
 interface ChatMessageProps {
-  message: Message
+  message: Message;
 }
 
 export default function ChatMessage({ message }: ChatMessageProps) {
-  const isUser = message.role === "user"
+  const isUser = message.role === "user";
 
   return (
-    <div className={cn("flex items-start gap-3", isUser ? "justify-end" : "justify-start")}>
+    <div
+      className={cn(
+        "flex items-start gap-3",
+        isUser ? "justify-end" : "justify-start"
+      )}
+    >
       {!isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center">
+        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-ocean-light flex items-center justify-center">
           <GiScales className="h-5 w-5 text-purple-600" />
         </div>
       )}
@@ -21,7 +26,9 @@ export default function ChatMessage({ message }: ChatMessageProps) {
       <div
         className={cn(
           "max-w-[80%] rounded-lg p-4",
-          isUser ? "bg-purple-600 text-white rounded-tr-none" : "bg-white border border-purple-100 rounded-tl-none",
+          isUser
+            ? "bg-ocean-light text-white rounded-tr-none"
+            : "bg-white border border-purple-100 rounded-tl-none"
         )}
       >
         <div className="whitespace-pre-wrap">{message.content}</div>
@@ -41,6 +48,5 @@ export default function ChatMessage({ message }: ChatMessageProps) {
         </div>
       )}
     </div>
-  )
+  );
 }
-

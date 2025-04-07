@@ -3,7 +3,7 @@ import { GiScales } from "react-icons/gi";
 
 export default function ChatHeader() {
   return (
-    <header className="bg- text-white py-6">
+    <header className="bg-ocean-dark text-white py-6">
       <div className="container max-w-4xl mx-auto px-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">

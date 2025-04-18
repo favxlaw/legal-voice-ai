@@ -16,7 +16,23 @@ type UploadStatus = {
   file: File;
   status: "pending" | "uploading" | "success" | "error";
   error?: string;
+  fileUrl?: string; // Added to store the S3 file URL
 };
+
+// Maximum allowed file size in bytes (e.g., 10MB)
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+// Allowed file types
+const ALLOWED_FILE_TYPES = [
+  "application/pdf",
+  "text/plain",
+  "image/jpeg",
+  "image/png",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/csv"
+];
 
 export default function Home() {
   const [attachments, setAttachments] = useState<File[]>([]);
@@ -35,17 +51,58 @@ export default function Home() {
       },
     });
 
+  const validateFile = (file: File): { valid: boolean; error?: string } => {
+    // Check file size
+    if (file.size > MAX_FILE_SIZE) {
+      return { 
+        valid: false, 
+        error: `File size exceeds the ${MAX_FILE_SIZE / (1024 * 1024)}MB limit` 
+      };
+    }
+    
+    // Check file type
+    if (!ALLOWED_FILE_TYPES.includes(file.type)) {
+      return { 
+        valid: false, 
+        error: "File type not supported" 
+      };
+    }
+    
+    return { valid: true };
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const newFiles = Array.from(e.target.files);
-      setAttachments((prev) => [...prev, ...newFiles]);
+      
+      // Validate each file before adding
+      const validFiles: File[] = [];
+      
+      newFiles.forEach(file => {
+        const validation = validateFile(file);
+        if (validation.valid) {
+          validFiles.push(file);
+        } else {
+          // Add the file with error status
+          setUploadStatuses(prev => [
+            ...prev, 
+            { 
+              file, 
+              status: "error", 
+              error: validation.error 
+            }
+          ]);
+        }
+      });
+      
+      setAttachments(prev => [...prev, ...validFiles]);
     }
   };
 
   const handleS3Upload = async (file: File) => {
     if (!process.env.NEXT_PUBLIC_UPLOAD_API_URL) {
       console.error("Upload API URL not configured");
-      return false;
+      return { success: false, error: "Upload API URL not configured" };
     }
 
     try {
@@ -64,18 +121,27 @@ export default function Home() {
       // Request pre-signed URL from API Gateway
       const response = await fetch(process.env.NEXT_PUBLIC_UPLOAD_API_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          // Add any authentication headers here if needed
+        },
         body: JSON.stringify({
           fileName: file.name,
           contentType: file.type
-        })
+        }),
+        credentials: "include" // Include cookies if using session authentication
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to get pre-signed URL: ${response.statusText}`);
+        const errorText = await response.text();
+        throw new Error(`Failed to get pre-signed URL: ${response.status} ${errorText}`);
       }
 
       const { uploadUrl, fileUrl } = await response.json();
+      
+      if (!uploadUrl) {
+        throw new Error("No upload URL provided by server");
+      }
 
       // Upload file directly to S3 using pre-signed URL
       const uploadResponse = await fetch(uploadUrl, {
@@ -85,18 +151,24 @@ export default function Home() {
       });
 
       if (!uploadResponse.ok) {
-        throw new Error(`Failed to upload file: ${uploadResponse.statusText}`);
+        throw new Error(`Failed to upload file: ${uploadResponse.status} ${await uploadResponse.text()}`);
       }
 
       // Update status to success
       setUploadStatuses(prev => prev.map(status => 
-        status.file.name === file.name ? { ...status, status: "success" } : status
+        status.file.name === file.name ? { 
+          ...status, 
+          status: "success",
+          fileUrl: fileUrl
+        } : status
       ));
 
-      return true;
+      return { success: true, fileUrl };
 
     } catch (error) {
       console.error("Error uploading file to S3:", error);
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      
       setUploadStatuses(prev => {
         const existingStatus = prev.find(status => status.file.name === file.name);
         if (existingStatus) {
@@ -104,18 +176,19 @@ export default function Home() {
             status.file.name === file.name ? { 
               ...status, 
               status: "error", 
-              error: error instanceof Error ? error.message : "Unknown error" 
+              error: errorMessage
             } : status
           );
         } else {
           return [...prev, { 
             file, 
             status: "error", 
-            error: error instanceof Error ? error.message : "Unknown error" 
+            error: errorMessage
           }];
         }
       });
-      return false;
+      
+      return { success: false, error: errorMessage };
     }
   };
 
@@ -144,7 +217,7 @@ export default function Home() {
       
       // Add pending status for PDFs not already in uploadStatuses
       for (const file of attachments) {
-        if (file.type === "application/pdf" && !prev.some(status => status.file.name === file.name)) {
+        if (!prev.some(status => status.file.name === file.name)) {
           newStatuses.push({ file, status: "pending" });
         }
       }
@@ -152,44 +225,65 @@ export default function Home() {
       return newStatuses;
     });
 
-    // Upload PDFs to S3 first
-    const pdfFiles = attachments.filter(file => file.type === "application/pdf");
-    const s3UploadResults = await Promise.all(
-      pdfFiles.map(async (file) => {
-        const success = await handleS3Upload(file);
-        return { file, success };
+    // Upload files to S3 first
+    const uploadResults = await Promise.all(
+      attachments.map(async (file) => {
+        const result = await handleS3Upload(file);
+        return { 
+          file, 
+          success: result.success, 
+          fileUrl: result.fileUrl,
+          error: result.error
+        };
       })
     );
     
-    // Append successful S3 uploads to the message
-    const successfulS3Uploads = s3UploadResults
-      .filter(result => result.success)
-      .map(result => result.file.name);
+    // Group upload results
+    const successfulUploads = uploadResults.filter(result => result.success);
+    const failedUploads = uploadResults.filter(result => !result.success);
     
+    // Append file information to the message
     if (attachments.length > 0) {
-      const fileNames = attachments
-        .filter(file => file.type !== "application/pdf")
-        .map(file => file.name);
-        
-      if (fileNames.length > 0) {
+      // Add successful uploads to message
+      if (successfulUploads.length > 0) {
         messageText += messageText ? '\n' : '';
-        messageText += `[Attached files: ${fileNames.join(", ")}]`;
+        messageText += `[Uploaded files: ${successfulUploads.map(result => result.file.name).join(", ")}]`;
       }
       
-      if (successfulS3Uploads.length > 0) {
+      // Add failed uploads to message
+      if (failedUploads.length > 0) {
         messageText += messageText ? '\n' : '';
-        messageText += `[S3 uploaded PDFs: ${successfulS3Uploads.join(", ")}]`;
+        messageText += `[Failed uploads: ${failedUploads.map(result => result.file.name).join(", ")}]`;
       }
     }
 
-    // Create an array to store file data (for non-PDF files)
-    const fileData: { name: string; type: string; content: string }[] = [];
+    // Create an array to store file data (for metadata and non-PDF files that don't use S3)
+    const fileData: { 
+      name: string; 
+      type: string; 
+      url?: string;
+      content?: string;
+    }[] = [];
 
-    // Read file contents only for non-PDF files
-    const nonPdfFiles = attachments.filter(file => file.type !== "application/pdf");
-    if (nonPdfFiles.length > 0) {
+    // Add S3 URLs for successfully uploaded files
+    successfulUploads.forEach(result => {
+      fileData.push({
+        name: result.file.name,
+        type: result.file.type,
+        url: result.fileUrl
+      });
+    });
+
+    // Read file contents for any files that need direct content inclusion
+    // This is kept for backwards compatibility or smaller files if needed
+    const nonS3Files = attachments.filter(
+      file => !successfulUploads.some(upload => upload.file.name === file.name) && 
+             !failedUploads.some(failed => failed.file.name === file.name)
+    );
+    
+    if (nonS3Files.length > 0) {
       await Promise.all(
-        nonPdfFiles.map(async (file) => {
+        nonS3Files.map(async (file) => {
           return new Promise<void>((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -207,7 +301,7 @@ export default function Home() {
       );
     }
 
-    // Update the input with message text that includes S3 uploads
+    // Update the input with message text that includes uploads information
     if (messageText !== input) {
       handleInputChange({ target: { value: messageText } } as any);
     }
@@ -270,22 +364,26 @@ export default function Home() {
             {attachments.length > 0 && (
               <div className="mb-3 flex flex-wrap gap-2">
                 {attachments.map((file, index) => {
-                  // Find if this file has an upload status (for PDFs)
+                  // Find if this file has an upload status
                   const uploadStatus = uploadStatuses.find(
-                    status => status.file.name === file.name && file.type === "application/pdf"
+                    status => status.file.name === file.name
                   );
                   
-                  // Determine status indicator component for PDFs
+                  // Determine status indicator component
                   let statusIndicator = null;
-                  if (file.type === "application/pdf" && uploadStatus) {
+                  if (uploadStatus) {
                     if (uploadStatus.status === "pending") {
                       statusIndicator = <span className="ml-1 text-blue-500">Pending...</span>;
                     } else if (uploadStatus.status === "uploading") {
                       statusIndicator = <span className="ml-1 text-blue-500">Uploading...</span>;
                     } else if (uploadStatus.status === "success") {
-                      statusIndicator = <span className="ml-1 text-green-500">✅ S3</span>;
+                      statusIndicator = <span className="ml-1 text-green-500">✅ Uploaded</span>;
                     } else if (uploadStatus.status === "error") {
-                      statusIndicator = <span className="ml-1 text-red-500">❌ Failed</span>;
+                      statusIndicator = (
+                        <span className="ml-1 text-red-500" title={uploadStatus.error || "Error"}>
+                          ❌ Failed
+                        </span>
+                      );
                     }
                   }
                   
@@ -309,6 +407,7 @@ export default function Home() {
                 onChange={handleFileChange}
                 className="hidden"
                 accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.csv,.xlsx,.xls,.ppt,.pptx"
+                multiple
               />
               <Button
                 type="button"

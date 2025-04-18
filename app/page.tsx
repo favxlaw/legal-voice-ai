@@ -128,8 +128,8 @@ export default function Home() {
         body: JSON.stringify({
           fileName: file.name,
           contentType: file.type
-        }),
-        credentials: "include" // Include cookies if using session authentication
+        })
+        //credentials: "include" // Include cookies if using session authentication
       });
 
       if (!response.ok) {

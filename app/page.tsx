@@ -30,42 +30,36 @@ export default function Home() {
       onFinish: () => {
         // Clear attachments after sending
         setAttachments([]);
+        // Clear upload statuses after sending
+        setUploadStatuses([]);
       },
     });
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const newFiles = Array.from(e.target.files);
-      
-      // Filter for PDF files for S3 upload
-      const pdfFiles = newFiles.filter(file => file.type === "application/pdf");
-      const otherFiles = newFiles.filter(file => file.type !== "application/pdf");
-      
-      // Add all files to regular attachments to maintain UI consistency
       setAttachments((prev) => [...prev, ...newFiles]);
-      
-      // Process PDF files for S3 upload
-      for (const pdfFile of pdfFiles) {
-        await handleS3Upload(pdfFile);
-      }
     }
   };
 
   const handleS3Upload = async (file: File) => {
     if (!process.env.NEXT_PUBLIC_UPLOAD_API_URL) {
       console.error("Upload API URL not configured");
-      return;
+      return false;
     }
-
-    // Add file to upload statuses with pending status
-    const newUpload: UploadStatus = { file, status: "pending" };
-    setUploadStatuses(prev => [...prev, newUpload]);
 
     try {
       // Update status to uploading
-      setUploadStatuses(prev => prev.map(upload => 
-        upload.file.name === file.name ? { ...upload, status: "uploading" } : upload
-      ));
+      setUploadStatuses(prev => {
+        const existingStatus = prev.find(status => status.file.name === file.name);
+        if (existingStatus) {
+          return prev.map(status => 
+            status.file.name === file.name ? { ...status, status: "uploading" } : status
+          );
+        } else {
+          return [...prev, { file, status: "uploading" }];
+        }
+      });
 
       // Request pre-signed URL from API Gateway
       const response = await fetch(process.env.NEXT_PUBLIC_UPLOAD_API_URL, {
@@ -95,29 +89,33 @@ export default function Home() {
       }
 
       // Update status to success
-      setUploadStatuses(prev => prev.map(upload => 
-        upload.file.name === file.name ? { ...upload, status: "success" } : upload
+      setUploadStatuses(prev => prev.map(status => 
+        status.file.name === file.name ? { ...status, status: "success" } : status
       ));
 
-      // Append S3 URL info to the file name in the attachments display
-      const updatedAttachments = attachments.map(attachment => {
-        if (attachment.name === file.name && attachment.type === "application/pdf") {
-          // Create a new File object with modified name to indicate S3 upload
-          return new File([attachment], attachment.name, { type: attachment.type });
-        }
-        return attachment;
-      });
-      setAttachments(updatedAttachments);
+      return true;
 
     } catch (error) {
       console.error("Error uploading file to S3:", error);
-      setUploadStatuses(prev => prev.map(upload => 
-        upload.file.name === file.name ? { 
-          ...upload, 
-          status: "error", 
-          error: error instanceof Error ? error.message : "Unknown error" 
-        } : upload
-      ));
+      setUploadStatuses(prev => {
+        const existingStatus = prev.find(status => status.file.name === file.name);
+        if (existingStatus) {
+          return prev.map(status => 
+            status.file.name === file.name ? { 
+              ...status, 
+              status: "error", 
+              error: error instanceof Error ? error.message : "Unknown error" 
+            } : status
+          );
+        } else {
+          return [...prev, { 
+            file, 
+            status: "error", 
+            error: error instanceof Error ? error.message : "Unknown error" 
+          }];
+        }
+      });
+      return false;
     }
   };
 
@@ -138,28 +136,60 @@ export default function Home() {
 
     // Create a message that includes information about attachments
     let messageText = input;
-    if (!messageText.trim()) return;
+    if (!messageText.trim() && attachments.length === 0) return;
+
+    // Initialize message with PDF uploads pending
+    setUploadStatuses(prev => {
+      const newStatuses = [...prev];
+      
+      // Add pending status for PDFs not already in uploadStatuses
+      for (const file of attachments) {
+        if (file.type === "application/pdf" && !prev.some(status => status.file.name === file.name)) {
+          newStatuses.push({ file, status: "pending" });
+        }
+      }
+      
+      return newStatuses;
+    });
+
+    // Upload PDFs to S3 first
+    const pdfFiles = attachments.filter(file => file.type === "application/pdf");
+    const s3UploadResults = await Promise.all(
+      pdfFiles.map(async (file) => {
+        const success = await handleS3Upload(file);
+        return { file, success };
+      })
+    );
+    
+    // Append successful S3 uploads to the message
+    const successfulS3Uploads = s3UploadResults
+      .filter(result => result.success)
+      .map(result => result.file.name);
+    
     if (attachments.length > 0) {
-      const fileNames = attachments.map((file) => file.name).join(", ");
-      messageText += `\n[Attached files: ${fileNames}]`;
+      const fileNames = attachments
+        .filter(file => file.type !== "application/pdf")
+        .map(file => file.name);
+        
+      if (fileNames.length > 0) {
+        messageText += messageText ? '\n' : '';
+        messageText += `[Attached files: ${fileNames.join(", ")}]`;
+      }
       
-      // Add information about S3 uploaded PDFs
-      const s3Files = uploadStatuses
-        .filter(status => status.status === "success")
-        .map(status => status.file.name);
-      
-      if (s3Files.length > 0) {
-        messageText += `\n[S3 uploaded PDFs: ${s3Files.join(", ")}]`;
+      if (successfulS3Uploads.length > 0) {
+        messageText += messageText ? '\n' : '';
+        messageText += `[S3 uploaded PDFs: ${successfulS3Uploads.join(", ")}]`;
       }
     }
 
-    // Create an array to store file data
+    // Create an array to store file data (for non-PDF files)
     const fileData: { name: string; type: string; content: string }[] = [];
 
-    // Read file contents
-    if (attachments.length > 0) {
+    // Read file contents only for non-PDF files
+    const nonPdfFiles = attachments.filter(file => file.type !== "application/pdf");
+    if (nonPdfFiles.length > 0) {
       await Promise.all(
-        attachments.map(async (file) => {
+        nonPdfFiles.map(async (file) => {
           return new Promise<void>((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -177,15 +207,17 @@ export default function Home() {
       );
     }
 
+    // Update the input with message text that includes S3 uploads
+    if (messageText !== input) {
+      handleInputChange({ target: { value: messageText } } as any);
+    }
+
     // Submit the message with file data
     handleSubmit(e, {
       data: {
         attachments: fileData,
       },
     });
-    
-    // Clear upload statuses after sending
-    setUploadStatuses([]);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -245,9 +277,9 @@ export default function Home() {
                   
                   // Determine status indicator component for PDFs
                   let statusIndicator = null;
-                  if (uploadStatus) {
+                  if (file.type === "application/pdf" && uploadStatus) {
                     if (uploadStatus.status === "pending") {
-                      statusIndicator = <span className="ml-1 text-blue-500">Preparing...</span>;
+                      statusIndicator = <span className="ml-1 text-blue-500">Pending...</span>;
                     } else if (uploadStatus.status === "uploading") {
                       statusIndicator = <span className="ml-1 text-blue-500">Uploading...</span>;
                     } else if (uploadStatus.status === "success") {

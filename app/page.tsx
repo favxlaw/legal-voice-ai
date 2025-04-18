@@ -186,6 +186,7 @@ export default function Home() {
     const fileData: { name: string; type: string; content: string }[] = [];
 
     // Read file contents only for non-PDF files
+    
     const nonPdfFiles = attachments.filter(file => file.type !== "application/pdf");
     if (nonPdfFiles.length > 0) {
       await Promise.all(

@@ -11,8 +11,16 @@ import ChatHeader from "@/components/chat-header";
 import ChatMessage from "@/components/chat-message";
 import FileAttachment from "@/components/file-attachment";
 
+// Status types for file upload
+type UploadStatus = {
+  file: File;
+  status: "pending" | "uploading" | "success" | "error";
+  error?: string;
+};
+
 export default function Home() {
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [uploadStatuses, setUploadStatuses] = useState<UploadStatus[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -25,10 +33,91 @@ export default function Home() {
       },
     });
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const newFiles = Array.from(e.target.files);
+      
+      // Filter for PDF files for S3 upload
+      const pdfFiles = newFiles.filter(file => file.type === "application/pdf");
+      const otherFiles = newFiles.filter(file => file.type !== "application/pdf");
+      
+      // Add all files to regular attachments to maintain UI consistency
       setAttachments((prev) => [...prev, ...newFiles]);
+      
+      // Process PDF files for S3 upload
+      for (const pdfFile of pdfFiles) {
+        await handleS3Upload(pdfFile);
+      }
+    }
+  };
+
+  const handleS3Upload = async (file: File) => {
+    if (!process.env.NEXT_PUBLIC_UPLOAD_API_URL) {
+      console.error("Upload API URL not configured");
+      return;
+    }
+
+    // Add file to upload statuses with pending status
+    const newUpload: UploadStatus = { file, status: "pending" };
+    setUploadStatuses(prev => [...prev, newUpload]);
+
+    try {
+      // Update status to uploading
+      setUploadStatuses(prev => prev.map(upload => 
+        upload.file.name === file.name ? { ...upload, status: "uploading" } : upload
+      ));
+
+      // Request pre-signed URL from API Gateway
+      const response = await fetch(process.env.NEXT_PUBLIC_UPLOAD_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: file.name,
+          contentType: file.type
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get pre-signed URL: ${response.statusText}`);
+      }
+
+      const { uploadUrl, fileUrl } = await response.json();
+
+      // Upload file directly to S3 using pre-signed URL
+      const uploadResponse = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type },
+        body: file
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error(`Failed to upload file: ${uploadResponse.statusText}`);
+      }
+
+      // Update status to success
+      setUploadStatuses(prev => prev.map(upload => 
+        upload.file.name === file.name ? { ...upload, status: "success" } : upload
+      ));
+
+      // Append S3 URL info to the file name in the attachments display
+      const updatedAttachments = attachments.map(attachment => {
+        if (attachment.name === file.name && attachment.type === "application/pdf") {
+          // Create a new File object with modified name to indicate S3 upload
+          return new File([attachment], attachment.name, { type: attachment.type });
+        }
+        return attachment;
+      });
+      setAttachments(updatedAttachments);
+
+    } catch (error) {
+      console.error("Error uploading file to S3:", error);
+      setUploadStatuses(prev => prev.map(upload => 
+        upload.file.name === file.name ? { 
+          ...upload, 
+          status: "error", 
+          error: error instanceof Error ? error.message : "Unknown error" 
+        } : upload
+      ));
     }
   };
 
@@ -37,7 +126,11 @@ export default function Home() {
   };
 
   const removeAttachment = (index: number) => {
+    const fileToRemove = attachments[index];
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+    
+    // Also remove from upload statuses if it exists there
+    setUploadStatuses(prev => prev.filter(status => status.file.name !== fileToRemove.name));
   };
 
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -49,6 +142,15 @@ export default function Home() {
     if (attachments.length > 0) {
       const fileNames = attachments.map((file) => file.name).join(", ");
       messageText += `\n[Attached files: ${fileNames}]`;
+      
+      // Add information about S3 uploaded PDFs
+      const s3Files = uploadStatuses
+        .filter(status => status.status === "success")
+        .map(status => status.file.name);
+      
+      if (s3Files.length > 0) {
+        messageText += `\n[S3 uploaded PDFs: ${s3Files.join(", ")}]`;
+      }
     }
 
     // Create an array to store file data
@@ -81,6 +183,9 @@ export default function Home() {
         attachments: fileData,
       },
     });
+    
+    // Clear upload statuses after sending
+    setUploadStatuses([]);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -104,7 +209,7 @@ export default function Home() {
       <ChatHeader />
 
       <main className="flex-1 container max-w-4xl mx-auto p-4 flex flex-col">
-        <Card className="flex-1 flex flex-col overflow-hidden shadow-lg border-purple-200  bg-ocean-darker">
+        <Card className="flex-1 flex flex-col overflow-hidden shadow-lg border-purple-200 bg-ocean-darker">
           <div className="flex-1 overflow-y-auto p-4 space-y-6">
             {messages.length === 0 ? (
               <div className="flex items-center justify-center h-full">
@@ -132,13 +237,36 @@ export default function Home() {
           <div className="border-t border-purple-100 p-4">
             {attachments.length > 0 && (
               <div className="mb-3 flex flex-wrap gap-2">
-                {attachments.map((file, index) => (
-                  <FileAttachment
-                    key={index}
-                    file={file}
-                    onRemove={() => removeAttachment(index)}
-                  />
-                ))}
+                {attachments.map((file, index) => {
+                  // Find if this file has an upload status (for PDFs)
+                  const uploadStatus = uploadStatuses.find(
+                    status => status.file.name === file.name && file.type === "application/pdf"
+                  );
+                  
+                  // Determine status indicator component for PDFs
+                  let statusIndicator = null;
+                  if (uploadStatus) {
+                    if (uploadStatus.status === "pending") {
+                      statusIndicator = <span className="ml-1 text-blue-500">Preparing...</span>;
+                    } else if (uploadStatus.status === "uploading") {
+                      statusIndicator = <span className="ml-1 text-blue-500">Uploading...</span>;
+                    } else if (uploadStatus.status === "success") {
+                      statusIndicator = <span className="ml-1 text-green-500">✅ S3</span>;
+                    } else if (uploadStatus.status === "error") {
+                      statusIndicator = <span className="ml-1 text-red-500">❌ Failed</span>;
+                    }
+                  }
+                  
+                  return (
+                    <div key={index} className="flex items-center">
+                      <FileAttachment
+                        file={file}
+                        onRemove={() => removeAttachment(index)}
+                      />
+                      {statusIndicator}
+                    </div>
+                  );
+                })}
               </div>
             )}
 

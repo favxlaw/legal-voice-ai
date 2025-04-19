@@ -82,6 +82,14 @@ export default function Home() {
         const validation = validateFile(file);
         if (validation.valid) {
           validFiles.push(file);
+          // Add the file with pending status
+          setUploadStatuses(prev => [
+            ...prev, 
+            { 
+              file, 
+              status: "pending"
+            }
+          ]);
         } else {
           // Add the file with error status
           setUploadStatuses(prev => [
@@ -207,27 +215,21 @@ export default function Home() {
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
-    // Create a message that includes information about attachments
-    let messageText = input;
-    if (!messageText.trim() && attachments.length === 0) return;
+    // Don't proceed if there's no input text and no attachments
+    if (!input.trim() && attachments.length === 0) return;
 
-    // Initialize message with PDF uploads pending
-    setUploadStatuses(prev => {
-      const newStatuses = [...prev];
-      
-      // Add pending status for PDFs not already in uploadStatuses
-      for (const file of attachments) {
-        if (!prev.some(status => status.file.name === file.name)) {
-          newStatuses.push({ file, status: "pending" });
-        }
-      }
-      
-      return newStatuses;
+    // Don't modify the user's input text - keep it as is
+    // We'll handle uploaded files separately in the data object
+    
+    // Upload any files that haven't been uploaded yet
+    const pendingFiles = attachments.filter(file => {
+      const status = uploadStatuses.find(s => s.file.name === file.name);
+      return !status || status.status === "pending" || status.status === "error";
     });
-
+    
     // Upload files to S3 first
     const uploadResults = await Promise.all(
-      attachments.map(async (file) => {
+      pendingFiles.map(async (file) => {
         const result = await handleS3Upload(file);
         return { 
           file, 
@@ -238,74 +240,23 @@ export default function Home() {
       })
     );
     
-    // Group upload results
-    const successfulUploads = uploadResults.filter(result => result.success);
-    const failedUploads = uploadResults.filter(result => !result.success);
-    
-    // Append file information to the message
-    if (attachments.length > 0) {
-      // Add successful uploads to message
-      if (successfulUploads.length > 0) {
-        messageText += messageText ? '\n' : '';
-        messageText += `[Uploaded files: ${successfulUploads.map(result => result.file.name).join(", ")}]`;
-      }
+    // Create an array to store file data for all attachments
+    const fileData = attachments.map(file => {
+      // Check if we just uploaded this file
+      const uploadResult = uploadResults.find(result => result.file.name === file.name);
       
-      // Add failed uploads to message
-      if (failedUploads.length > 0) {
-        messageText += messageText ? '\n' : '';
-        messageText += `[Failed uploads: ${failedUploads.map(result => result.file.name).join(", ")}]`;
-      }
-    }
-
-    // Create an array to store file data (for metadata and non-PDF files that don't use S3)
-    const fileData: { 
-      name: string; 
-      type: string; 
-      url?: string;
-      content?: string;
-    }[] = [];
-
-    // Add S3 URLs for successfully uploaded files
-    successfulUploads.forEach(result => {
-      fileData.push({
-        name: result.file.name,
-        type: result.file.type,
-        url: result.fileUrl
-      });
-    });
-
-    // Read file contents for any files that need direct content inclusion
-    // This is kept for backwards compatibility or smaller files if needed
-    const nonS3Files = attachments.filter(
-      file => !successfulUploads.some(upload => upload.file.name === file.name) && 
-             !failedUploads.some(failed => failed.file.name === file.name)
-    );
-    
-    if (nonS3Files.length > 0) {
-      await Promise.all(
-        nonS3Files.map(async (file) => {
-          return new Promise<void>((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              const content = e.target?.result as string;
-              fileData.push({
-                name: file.name,
-                type: file.type,
-                content: content,
-              });
-              resolve();
-            };
-            reader.readAsDataURL(file);
-          });
-        })
+      // Check if this file was previously uploaded
+      const existingStatus = uploadStatuses.find(status => 
+        status.file.name === file.name && status.status === "success"
       );
-    }
-
-    // Update the input with message text that includes uploads information
-    if (messageText !== input) {
-      handleInputChange({ target: { value: messageText } } as any);
-    }
-
+      
+      return {
+        name: file.name,
+        type: file.type,
+        url: uploadResult?.fileUrl || existingStatus?.fileUrl
+      };
+    }).filter(file => file.url); // Only include files that have a URL
+    
     // Submit the message with file data
     handleSubmit(e, {
       data: {
@@ -373,7 +324,7 @@ export default function Home() {
                   let statusIndicator = null;
                   if (uploadStatus) {
                     if (uploadStatus.status === "pending") {
-                      statusIndicator = <span className="ml-1 text-blue-500">Pending...</span>;
+                      statusIndicator = <span className="ml-1 text-blue-500">Pending</span>;
                     } else if (uploadStatus.status === "uploading") {
                       statusIndicator = <span className="ml-1 text-blue-500">Uploading...</span>;
                     } else if (uploadStatus.status === "success") {
